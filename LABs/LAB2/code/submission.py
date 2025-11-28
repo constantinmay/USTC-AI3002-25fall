@@ -4,13 +4,16 @@ import os
 import numpy as np
 from sklearn.cluster import KMeans
 
+# Constants for numerical stability
+EPS_LOG = 1e-300  # Small value for log operations to prevent log(0)
+EPS_CLIP = 1e-10  # Small value for clipping to avoid division by zero
+
 def data_preprocess(example: np.ndarray) -> np.ndarray:
     """
     完成数据预处理，需要返回处理后的example字典
     
     预处理策略：
     1. 归一化到[0,1]范围
-    2. 标准化（零均值，单位方差）使聚类更稳定
     """
     img_np = np.array(example["image"], dtype=np.float32)
 
@@ -220,7 +223,7 @@ class GMM:
             log_prob_k = -0.5 * (D * np.log(2 * np.pi) + log_det + mahalanobis)
             
             # 加上混合权重的对数
-            log_prob[:, k] = log_prob_k + np.log(weight_k + 1e-300)
+            log_prob[:, k] = log_prob_k + np.log(weight_k + EPS_LOG)
         
         # 使用log-sum-exp技巧计算归一化后验概率
         # log(sum(exp(log_prob))) = max + log(sum(exp(log_prob - max)))
@@ -232,7 +235,7 @@ class GMM:
         resp = np.exp(log_prob - log_sum_exp[:, np.newaxis])
         
         # 确保resp是有效的概率分布
-        resp = np.clip(resp, 1e-300, 1.0)
+        resp = np.clip(resp, EPS_LOG, 1.0)
         resp /= resp.sum(axis=1, keepdims=True)
         
         # 计算下界（对数似然）
@@ -261,7 +264,7 @@ class GMM:
         N_k = np.sum(resp, axis=0)  # (K,)
         
         # 避免除以零
-        N_k = np.clip(N_k, 1e-10, None)
+        N_k = np.clip(N_k, EPS_CLIP, None)
         
         # 1. 更新权重（混合系数）: π_k = N_k / N
         self.weights_ = N_k / N
@@ -310,7 +313,7 @@ class GMM:
             resp, lower = self._estep(X)
             self._mstep(X, resp)
             self.n_iter_ = it
-            improvement = (lower - prev_lower) / (abs(prev_lower) + 1e-12)
+            improvement = (lower - prev_lower) / (abs(prev_lower) + EPS_CLIP)
             if improvement < self.tol:
                 self.converged_ = True
                 break
