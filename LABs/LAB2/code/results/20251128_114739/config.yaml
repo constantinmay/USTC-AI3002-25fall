@@ -1,0 +1,8 @@
+cache_dir: ./data
+dr_method: pca
+gmm_components: 10
+gmm_max_iter: 100
+gmm_tol: 1.0e-05
+pca_components: 100
+results_path: null
+seed: 42
