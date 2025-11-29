@@ -308,15 +308,24 @@ class GMM:
             self.weights_ = np.ones(self.n_components, dtype=np.float64) / self.n_components
             self.covariances_ = np.stack([np.eye(D) for _ in range(self.n_components)], axis=0)
 
-        prev_lower = -np.inf
+        prev_lower = None
         for it in range(1, self.max_iter + 1):
             resp, lower = self._estep(X)
             self._mstep(X, resp)
             self.n_iter_ = it
-            improvement = (lower - prev_lower) / (abs(prev_lower) + EPS_CLIP)
-            if improvement < self.tol:
-                self.converged_ = True
-                break
+            
+            # Skip convergence check on first iteration
+            if prev_lower is not None:
+                # Compute relative improvement safely
+                if np.isinf(prev_lower) or prev_lower == 0:
+                    improvement = np.inf
+                else:
+                    improvement = (lower - prev_lower) / (abs(prev_lower) + EPS_CLIP)
+                
+                if improvement < self.tol:
+                    self.converged_ = True
+                    break
+            
             prev_lower = lower
         self.lower_bound_ = lower
         return self
