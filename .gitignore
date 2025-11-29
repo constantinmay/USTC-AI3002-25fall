@@ -210,3 +210,7 @@ latex/
 
 *.DS_Store
 *.zip
+
+# LAB2 results directory (generated during training)
+LABs/LAB2/code/results/
+LABs/LAB2/code/data/

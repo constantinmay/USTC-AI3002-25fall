@@ -4,25 +4,32 @@ import os
 import numpy as np
 from sklearn.cluster import KMeans
 
+# Constants for numerical stability
+EPS_LOG = 1e-300  # Small value for log operations to prevent log(0)
+EPS_CLIP = 1e-10  # Small value for clipping to avoid division by zero
+
 def data_preprocess(example: np.ndarray) -> np.ndarray:
     """
-    TODO: 完成数据预处理，需要返回处理后的example字典
+    完成数据预处理，需要返回处理后的example字典
+    
+    预处理策略：
+    1. 归一化到[0,1]范围
     """
-    img_np = np.array(example["image"], dtype=np.uint8)
+    img_np = np.array(example["image"], dtype=np.float32)
 
-    # TODO: 1. 将图像扩展维度 (28,28) -> (1,28,28)
-    img_np_with_channel = None
+    # 1. 归一化到[0,1]范围
+    img_normalized = img_np / 255.0
     
-    # TODO: 2. 将图像展平为一维数组 (28,28) -> (784,)
-    img_np_flat = None
+    # 2. 将图像扩展维度 (28,28) -> (1,28,28)
+    img_np_with_channel = np.expand_dims(img_normalized, axis=0)
     
-    # TODO: 3. 将处理后的数据添加到example字典中
-    # example["image2D"] = ...
-    # example["image1D"] = ...
+    # 3. 将图像展平为一维数组 (28,28) -> (784,)
+    img_np_flat = img_normalized.flatten()
+    
+    # 4. 将处理后的数据添加到example字典中
+    example["image2D"] = img_np_with_channel
+    example["image1D"] = img_np_flat
 
-    # TODO: 4.（可选）进行相关数据预处理，例如：归一化、标准化等
-
-    raise NotImplementedError("请完成data_preprocess函数")
     return example
 
 class PCA:
@@ -56,7 +63,31 @@ class PCA:
         X : np.ndarray of shape (N, D)
             Input data.
         """
-        raise NotImplementedError("完成 PCA.fit 方法")
+        N, D = X.shape
+        
+        # 1. 计算并保存均值
+        self.mean_ = np.mean(X, axis=0)
+        
+        # 2. 中心化数据
+        X_centered = X - self.mean_
+        
+        # 3. 使用SVD进行分解
+        # X_centered = U @ S @ Vt
+        # 主成分方向是Vt的前n_components行
+        U, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
+        
+        # 4. 保存主成分（前n_components个）
+        self.components_ = Vt[:self.n_components]
+        
+        # 5. 计算方差解释量
+        # 奇异值与方差的关系: variance = S^2 / (N-1)
+        explained_variance = (S ** 2) / (N - 1)
+        self.explained_variance_ = explained_variance[:self.n_components]
+        
+        # 6. 计算方差贡献比例
+        total_variance = np.sum(explained_variance)
+        self.explained_variance_ratio_ = self.explained_variance_ / total_variance
+        
         return self
 
     def transform(self, X: np.ndarray) -> np.ndarray:
@@ -145,18 +176,71 @@ class GMM:
             resp: 后验概率矩阵 (N, K)，resp[i,k] 表示样本i属于聚类k的概率
             lower_bound: 下界值（用于判断收敛）
         
-        TODO: 实现E-step
+        实现E-step:
         1. 计算每个样本在每个高斯分布下的对数概率
         2. 使用log-sum-exp技巧计算归一化的后验概率
         3. 返回responsibilities和下界值
         """
-        # responsibilities
         K = self.n_components
-        N = X.shape[0]
+        N, D = X.shape
         log_prob = np.empty((N, K), dtype=X.dtype)
         
-
-        raise NotImplementedError("完成 GMM._estep 方法")
+        # 计算每个样本在每个高斯分布下的加权对数概率
+        for k in range(K):
+            # 获取当前高斯分布的参数
+            mean_k = self.means_[k]
+            cov_k = self.covariances_[k]
+            weight_k = self.weights_[k]
+            
+            # 添加正则化项以确保协方差矩阵正定
+            cov_k_reg = cov_k + self.reg_covar * np.eye(D)
+            
+            # 计算多元高斯分布的对数概率密度
+            # log N(x|μ,Σ) = -0.5 * [D*log(2π) + log|Σ| + (x-μ)^T Σ^{-1} (x-μ)]
+            try:
+                # 使用Cholesky分解来稳定计算
+                L = np.linalg.cholesky(cov_k_reg)
+                log_det = 2 * np.sum(np.log(np.diag(L)))
+                
+                # 计算 (x-μ)^T Σ^{-1} (x-μ) = ||L^{-1}(x-μ)||^2
+                diff = X - mean_k  # (N, D)
+                # 解 L @ y = diff.T，得到 y = L^{-1} @ diff.T
+                y = np.linalg.solve(L, diff.T)  # (D, N)
+                mahalanobis = np.sum(y ** 2, axis=0)  # (N,)
+            except np.linalg.LinAlgError:
+                # 如果Cholesky分解失败，使用更稳定的方法
+                sign, log_det = np.linalg.slogdet(cov_k_reg)
+                if sign <= 0:
+                    log_det = D * np.log(self.reg_covar)
+                diff = X - mean_k
+                try:
+                    cov_inv = np.linalg.inv(cov_k_reg)
+                except np.linalg.LinAlgError:
+                    cov_inv = np.eye(D) / self.reg_covar
+                mahalanobis = np.sum(diff @ cov_inv * diff, axis=1)
+            
+            # 计算对数概率
+            log_prob_k = -0.5 * (D * np.log(2 * np.pi) + log_det + mahalanobis)
+            
+            # 加上混合权重的对数
+            log_prob[:, k] = log_prob_k + np.log(weight_k + EPS_LOG)
+        
+        # 使用log-sum-exp技巧计算归一化后验概率
+        # log(sum(exp(log_prob))) = max + log(sum(exp(log_prob - max)))
+        log_prob_max = np.max(log_prob, axis=1, keepdims=True)
+        log_prob_norm = log_prob - log_prob_max
+        log_sum_exp = log_prob_max.flatten() + np.log(np.sum(np.exp(log_prob_norm), axis=1))
+        
+        # 计算responsibilities: resp[i,k] = exp(log_prob[i,k] - log_sum_exp[i])
+        resp = np.exp(log_prob - log_sum_exp[:, np.newaxis])
+        
+        # 确保resp是有效的概率分布
+        resp = np.clip(resp, EPS_LOG, 1.0)
+        resp /= resp.sum(axis=1, keepdims=True)
+        
+        # 计算下界（对数似然）
+        lower_bound = np.sum(log_sum_exp)
+        
         return resp, lower_bound
 
     def _mstep(self, X: np.ndarray, resp: np.ndarray) -> None:
@@ -167,14 +251,41 @@ class GMM:
             X: 数据矩阵 (N, D)
             resp: 后验概率矩阵 (N, K)
         
-        TODO: 实现M-step
+        实现M-step:
         更新以下属性：
         1. self.weights_: 每个聚类的权重（先验概率）
         2. self.means_: 每个高斯分布的均值向量
         3. self.covariances_: 每个高斯分布的协方差矩阵
         """
-
-        raise NotImplementedError("完成 GMM._mstep 方法")
+        N, D = X.shape
+        K = self.n_components
+        
+        # 计算每个聚类的有效样本数 N_k = sum_i(resp[i,k])
+        N_k = np.sum(resp, axis=0)  # (K,)
+        
+        # 避免除以零
+        N_k = np.clip(N_k, EPS_CLIP, None)
+        
+        # 1. 更新权重（混合系数）: π_k = N_k / N
+        self.weights_ = N_k / N
+        
+        # 2. 更新均值: μ_k = (1/N_k) * sum_i(resp[i,k] * x_i)
+        self.means_ = (resp.T @ X) / N_k[:, np.newaxis]  # (K, D)
+        
+        # 3. 更新协方差矩阵
+        # Σ_k = (1/N_k) * sum_i(resp[i,k] * (x_i - μ_k)(x_i - μ_k)^T)
+        self.covariances_ = np.zeros((K, D, D), dtype=X.dtype)
+        
+        for k in range(K):
+            diff = X - self.means_[k]  # (N, D)
+            # 加权外积
+            weighted_diff = resp[:, k:k+1] * diff  # (N, D)
+            cov_k = (weighted_diff.T @ diff) / N_k[k]
+            
+            # 添加正则化项确保协方差矩阵正定
+            cov_k += self.reg_covar * np.eye(D)
+            
+            self.covariances_[k] = cov_k
 
     def fit(self, X: np.ndarray) -> "GMM":
         rng = self._rng()
@@ -197,15 +308,24 @@ class GMM:
             self.weights_ = np.ones(self.n_components, dtype=np.float64) / self.n_components
             self.covariances_ = np.stack([np.eye(D) for _ in range(self.n_components)], axis=0)
 
-        prev_lower = -np.inf
+        prev_lower = None
         for it in range(1, self.max_iter + 1):
             resp, lower = self._estep(X)
             self._mstep(X, resp)
             self.n_iter_ = it
-            improvement = (lower - prev_lower) / (abs(prev_lower) + 1e-12)
-            if improvement < self.tol:
-                self.converged_ = True
-                break
+            
+            # Skip convergence check on first iteration
+            if prev_lower is not None:
+                # Compute relative improvement safely
+                if np.isinf(prev_lower) or prev_lower == 0:
+                    improvement = np.inf
+                else:
+                    improvement = (lower - prev_lower) / (abs(prev_lower) + EPS_CLIP)
+                
+                if improvement < self.tol:
+                    self.converged_ = True
+                    break
+            
             prev_lower = lower
         self.lower_bound_ = lower
         return self
